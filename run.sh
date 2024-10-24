@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 
 function init {
     echo "Botstrap version ${VERSION}"
@@ -66,6 +66,7 @@ function create_bootstrap {
     fi
 
     echo "Attempting to create bootstrap..."
+    echo "Existing error count: ${CREATE_BOOTSTRAP_ERRORS}"
 
     URL="http://${NODE_HOST}:${NODE_PORT}/bootstrap/create"
     RESULT=$(curl -s -X POST --max-time "${TIMEOUT}" "${URL}")
@@ -75,6 +76,7 @@ function create_bootstrap {
         echo "Empty response from create bootstrap API, sleeping for 30 seconds and trying again..."
         sleep 30
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
 	return 1
     fi
 
@@ -84,6 +86,7 @@ function create_bootstrap {
         echo "An error occurred: ${ERROR_MESSAGE}, sleeping 30 seconds..."
 	sleep 30
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
         return 2
     fi
 
@@ -93,6 +96,7 @@ function create_bootstrap {
         echo "Error: invalid path: ${PATH_RESPONSE}, sleeping 20 seconds..."
 	sleep 20
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
         return 3
     fi
 
@@ -110,6 +114,7 @@ function create_bootstrap {
     else
         echo "Error: Unable to retrieve block height."
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
         return 4
     fi
 
