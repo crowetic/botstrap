@@ -55,13 +55,14 @@ function read_config {
 function create_bootstrap {
     # Check if we need to restart the node
     if [ "${CREATE_BOOTSTRAP_ERRORS}" -ge 10 ]; then
-        CREATE_BOOTSTRAP_ERRORS=0
+        
 
         # This relies on having a systemd service set up to automatically start qortal after stopping.
         echo "Restarting node due to ${CREATE_BOOTSTRAP_ERRORS} consecutive errors..."
 	# testing stopping via bash and stop script instead of trying to use sudo in script running as user.
 	bash /opt/qortal/stop.sh
 	# sleeping for 100 seconds to give Qortal service a chance to start fully again...
+	CREATE_BOOTSTRAP_ERRORS=0
 	sleep 100
     fi
 
