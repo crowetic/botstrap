@@ -54,7 +54,7 @@ function read_config {
 
 function create_bootstrap {
     # Check if we need to restart the node
-    if [ "${CREATE_BOOTSTRAP_ERRORS} " -gt 100 ]; then
+    if [ "${CREATE_BOOTSTRAP_ERRORS}" -ge 10 ]; then
         CREATE_BOOTSTRAP_ERRORS=0
 
         # This relies on having a systemd service set up to automatically start qortal after stopping.
@@ -74,6 +74,7 @@ function create_bootstrap {
     if [ -z "${RESULT}" ]; then
         echo "Empty response from create bootstrap API, sleeping for 30 seconds and trying again..."
         sleep 30
+        CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
 	return 1
     fi
 
@@ -82,6 +83,7 @@ function create_bootstrap {
         ERROR_MESSAGE=$(echo "${RESULT}" | jq -r '.["message"]')
         echo "An error occurred: ${ERROR_MESSAGE}, sleeping 30 seconds..."
 	sleep 30
+        CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
         return 2
     fi
 
@@ -90,6 +92,7 @@ function create_bootstrap {
     if [[ ! "${PATH_RESPONSE}" == *".7z" ]]; then
         echo "Error: invalid path: ${PATH_RESPONSE}, sleeping 20 seconds..."
 	sleep 20
+        CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
         return 3
     fi
 
@@ -102,15 +105,17 @@ function create_bootstrap {
     echo "Fetching block height..."
     BLOCK_HEIGHT=$(curl -s localhost:12391/admin/status | jq -r '.height')
     if [ -n "$BLOCK_HEIGHT" ]; then
-        echo "$BLOCK_HEIGHT" > block.txt
-        echo "Block height $BLOCK_HEIGHT written to block.txt"
+        echo "$BLOCK_HEIGHT" > /var/www/html/block.txt
+        echo "Block height $BLOCK_HEIGHT written to /var/www/html/block.txt"
     else
         echo "Error: Unable to retrieve block height."
+        CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
         return 4
     fi
 
     return 0
 }
+
 
 function upload_to_main_host {
     
@@ -130,8 +135,14 @@ function upload_to_main_host {
     rsync -raPz "${BOOTSTRAP_CHECKSUM_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}"
 
     # Upload block.txt to the main host
-    echo "Uploading block.txt to ${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/block.txt..."
-    rsync -raPz "block.txt" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/block.txt"
+    if [ -f "block.txt" ]; then
+        BLOCK_FILE_PATH="block.txt"
+    else
+        BLOCK_FILE_PATH="${BOOTSTRAP_WEBROOT}/block.txt"
+    fi
+
+    echo "Uploading ${BLOCK_FILE_PATH} to ${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/block.txt..."
+    rsync -raPz "${BLOCK_FILE_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/block.txt"
 
     # Check the files are intact
     local CHECKSUM_URL="http://${BOOTSTRAP_HOST}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}"
@@ -233,7 +244,7 @@ function sync_mirror {
 
     # Upload block.txt to mirror
     echo "Uploading block.txt to mirror ${MIRROR}:${BOOTSTRAP_WEBROOT}/block.txt..."
-    rsync -raPz "block.txt" "${BOOTSTRAP_USER}@${MIRROR}:${BOOTSTRAP_WEBROOT}/block.txt"
+    rsync -raPz "${BOOTSTRAP_WEBROOT}/block.txt" "${BOOTSTRAP_USER}@${MIRROR}:${BOOTSTRAP_WEBROOT}/block.txt"
 
     # Check the files are intact
     echo "Checking copied files..."
