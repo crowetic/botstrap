@@ -1,0 +1,17 @@
+{
+    "nodeHost": "localhost",
+    "nodePort": 12391,
+    "nodeService": "qortal",
+    "bootstrapHost": "bootstrap3.qortal.org",
+    "bootstrapHostMode": "local",
+    "bootstrapMirrors": [
+	"bootstrap-ssh.qortal.org",
+        "bootstrap2-ssh.qortal.org",
+	"bootstrap4-ssh.qortal.org"
+    ],
+    "bootstrapUser": "crowetic",
+    "bootstrapWebRoot": "/var/www/html",
+    "timeout": 14400,
+    "bootstrapInterval": 39600,
+    "retryInterval": 60
+}
