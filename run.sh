@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="1.0.2"
+VERSION="1.0.3"
 
 function init {
     echo "Botstrap version ${VERSION}"
@@ -23,8 +23,6 @@ function init {
     	sudo apt update && sudo apt -y install jq
     fi
     
-    
-
     echo "Important: make sure you have run ssh-copy-id for each host or mirror before using this script."
 
     CREATE_BOOTSTRAP_ERRORS=0
@@ -34,6 +32,7 @@ function reset {
     BOOTSTRAP_PATH=""
     BOOTSTRAP_CHECKSUM_PATH=""
 }
+
 
 function read_config {
     CONFIG=$(cat "/opt/botstrap/config.json")
@@ -48,17 +47,25 @@ function read_config {
     TIMEOUT=$(echo "$CONFIG" | jq -r '.["timeout"]')
     BOOTSTRAP_INTERVAL=$(echo "$CONFIG" | jq -r '.["bootstrapInterval"]')
     RETRY_INTERVAL=$(echo "$CONFIG" | jq -r '.["retryInterval"]')
+    CREATE_BOOTSTRAP_ERROR_TOTAL=$(echo "$CONFIG" | jq -r '.["createBootstrapErrorTotal"]')
 
     #echo "CONFIG: ${CONFIG}"
 }
+#todo - move this into config.
+LOCK_FILE_NAME=".botstrap.lock"
+LOCK_FILE_CONTENT="locked-by-$(hostname)-$(date +%s)"
+LOCK_FILE_PATH="${BOOTSTRAP_WEBROOT}/${LOCK_FILE_NAME}"
+LOCK_EXPIRY_SECONDS=600
+LOCAL_LOCK_STATE_FILE="/opt/botstrap/state/last-lock.json"
+MIRROR_LOCK_STATE_DIR="/opt/botstrap/state/mirrors"
+mkdir -p "${MIRROR_LOCK_STATE_DIR}"
 
 function create_bootstrap {
     # Check if we need to restart the node
-    if [ "${CREATE_BOOTSTRAP_ERRORS}" -ge 10 ]; then
+    if [ "${CREATE_BOOTSTRAP_ERRORS}" -ge "${CREATE_BOOTSTRAP_ERROR_TOTAL}" ]; then
         
-
-        # This relies on having a systemd service set up to automatically start qortal after stopping.
-        echo "Restarting node due to ${CREATE_BOOTSTRAP_ERRORS} consecutive errors..."
+    # This relies on having a systemd service set up to automatically start qortal after stopping.
+    echo "Restarting node due to ${CREATE_BOOTSTRAP_ERRORS} consecutive errors..."
 	# testing stopping via bash and stop script instead of trying to use sudo in script running as user.
 	bash /opt/qortal/stop.sh
 	# sleeping for 100 seconds to give Qortal service a chance to start fully again...
@@ -77,7 +84,7 @@ function create_bootstrap {
         echo "Empty response from create bootstrap API, sleeping for 30 seconds and trying again..."
         sleep 30
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
-        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / ${CREATE_BOOTSTRAP_ERROR_TOTAL}"
 	return 1
     fi
 
@@ -87,7 +94,7 @@ function create_bootstrap {
         echo "An error occurred: ${ERROR_MESSAGE}, sleeping 30 seconds..."
 	sleep 30
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
-        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / ${CREATE_BOOTSTRAP_ERROR_TOTAL}"
         return 2
     fi
 
@@ -97,7 +104,7 @@ function create_bootstrap {
         echo "Error: invalid path: ${PATH_RESPONSE}, sleeping 20 seconds..."
 	sleep 20
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
-        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / ${CREATE_BOOTSTRAP_ERROR_TOTAL}"
         return 3
     fi
 
@@ -115,7 +122,7 @@ function create_bootstrap {
     else
         echo "Error: Unable to retrieve block height."
         CREATE_BOOTSTRAP_ERRORS=$((CREATE_BOOTSTRAP_ERRORS + 1))
-        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / 10"
+        echo "ERRORS: ${CREATE_BOOTSTRAP_ERRORS} / ${CREATE_BOOTSTRAP_ERROR_TOTAL}"
         return 4
     fi
 
@@ -229,59 +236,42 @@ function move_to_local_host {
 }
 
 function sync_mirror {
-    MIRROR="${1}"
+    MIRROR="$1"
 
-    echo "Syncing mirror ${MIRROR}..."
+    lock_mirror "${MIRROR}" || return 1
+
+    echo "==> Syncing to mirror: ${MIRROR}..."
 
     local BOOTSTRAP_FILENAME="$(basename -- $BOOTSTRAP_PATH)"
     local BOOTSTRAP_CHECKSUM_FILENAME="$(basename -- $BOOTSTRAP_CHECKSUM_PATH)"
     local BOOTSTRAP_FILENAME_NEW="${BOOTSTRAP_FILENAME}.new"
     local BOOTSTRAP_CHECKSUM_FILENAME_NEW="${BOOTSTRAP_CHECKSUM_FILENAME}.new"
 
-    # Add the host to known hosts, to avoid terminal prompts when adding a new host in the config
-    ssh-keyscan "${MIRROR}" >> "${HOME}/.ssh/known_hosts"
+    for FILE in "${BOOTSTRAP_FILENAME_NEW}" "${BOOTSTRAP_CHECKSUM_FILENAME_NEW}" "block.txt"; do
+        SRC="${BOOTSTRAP_WEBROOT}/${FILE}"
+        DEST=":sftp,host=${MIRROR},user=${BOOTSTRAP_USER}:${BOOTSTRAP_WEBROOT}/${FILE}"
+        
+        echo "Uploading ${SRC} to ${DEST}..."
+        rclone copy "${SRC}" "${DEST}" --retries 5 --transfers 4 --sftp-disable-hashcheck=false --progress --checksum --sftp-set-modtime=false --log-file "/opt/botstrap/logs/botstrap-rclone-${MIRROR}.log" --log-level INFO || {
+            echo "❌ Rclone sync failed for ${MIRROR}/${FILE}"
+            return 1
+        }
+    done
 
-    # Upload the files
-    echo "Uploading ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW} to mirror ${MIRROR}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}..."
-    rsync -raPz "${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}" "${BOOTSTRAP_USER}@${MIRROR}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}"
-    
-    echo "Uploading ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW} to mirror ${MIRROR}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}..."
-    rsync -raPz "${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}" "${BOOTSTRAP_USER}@${MIRROR}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}"
-
-    # Upload block.txt to mirror
-    echo "Uploading block.txt to mirror ${MIRROR}:${BOOTSTRAP_WEBROOT}/block.txt..."
-    rsync -raPz "${BOOTSTRAP_WEBROOT}/block.txt" "${BOOTSTRAP_USER}@${MIRROR}:${BOOTSTRAP_WEBROOT}/block.txt"
-
-    # Check the files are intact
-    echo "Checking copied files..."
-    local CHECKSUM_URL="http://${MIRROR}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}"
-    local CHECKSUM_REMOTE=$(curl -s "${CHECKSUM_URL}")
-    local CHECKSUM_LOCAL=$(cat "${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}")
-    if [ -z "${CHECKSUM_REMOTE}" ]; then
-        echo "Error: no checksum could be found on mirror ${MIRROR}"
-        return 1
-    fi
-    if [[ "${CHECKSUM_REMOTE}" != "${CHECKSUM_LOCAL}" ]]; then
-        echo "Error: checksum files on mirror do not match the local checksum"
-        echo "CHECKSUM_LOCAL: ${CHECKSUM_LOCAL}"
-        echo "CHECKSUM_REMOTE: ${CHECKSUM_REMOTE}"
-        echo "CHECKSUM_URL: ${CHECKSUM_URL}"
-        return 2
-    fi
-
-    # Check that the uploaded file matches the checksum file
-    echo "Validating checksum..."
-    COMPUTED_CHECKSUM_REMOTE=$(ssh "${BOOTSTRAP_USER}@${MIRROR}" "sha256sum ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}" | awk '{ print $1 }')
-    if [[ "${COMPUTED_CHECKSUM_REMOTE}" != "${CHECKSUM_LOCAL}" ]]; then
-        echo "Error: checksum of file uploaded to mirror ${MIRROR} does not match"
-        echo "CHECKSUM_LOCAL: ${CHECKSUM_LOCAL}"
-        echo "COMPUTED_CHECKSUM_REMOTE: ${COMPUTED_CHECKSUM_REMOTE}"
-        echo "BOOTSTRAP_FILENAME_NEW: ${BOOTSTRAP_FILENAME_NEW}"
-        return 3
-    fi
-
-    # All good
+    echo "✅ Mirror ${MIRROR} synced successfully."
+    unlock_mirror "${MIRROR}"
     return 0
+}
+
+function sync_mirrors {
+    BOOTSTRAP_MIRRORS_ARRAY=$(echo "${BOOTSTRAP_MIRRORS}" | jq -r @sh | xargs echo)
+
+    for MIRROR in ${BOOTSTRAP_MIRRORS_ARRAY}; do
+        sync_mirror "${MIRROR}" &
+    done
+
+    wait
+    echo "✅ All mirrors attempted."
 }
 
 function validate_timestamp {
@@ -335,18 +325,119 @@ function upload {
     return 0
 }
 
-function sync_mirrors {
-    # Loop through mirrors
-    BOOTSTRAP_MIRRORS_ARRAY=$(echo "${BOOTSTRAP_MIRRORS}" | jq -r @sh | xargs echo)
-    for MIRROR in ${BOOTSTRAP_MIRRORS_ARRAY}
-    do
-        sync_mirror "${MIRROR}"
-        EXIT_CODE=$?
-        if [ "${EXIT_CODE}" -ne 0 ]; then
-            # Don't enforce, as otherwise a single offline mirror would prevent bootstraps being updated
-            echo "Warning: mirror ${MIRROR} failed to sync. Proceeding anyway..."
+function initiate_lock {
+    echo "Attempting to acquire lock on ${BOOTSTRAP_HOST}..."
+
+    # Create local state directory if needed
+    mkdir -p "$(dirname "${LOCAL_LOCK_STATE_FILE}")"
+
+    # Check if lock exists
+    if ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "[ -f ${LOCK_FILE_PATH} ]"; then
+        # Download the lock for inspection
+        LOCK_DATA=$(ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "cat ${LOCK_FILE_PATH}" 2>/dev/null)
+        LOCK_TS=$(echo "${LOCK_DATA}" | jq -r '.timestamp // 0')
+        NOW_TS=$(date +%s)
+        AGE=$((NOW_TS - LOCK_TS))
+
+        if [ "$AGE" -gt "$LOCK_EXPIRY_SECONDS" ]; then
+            echo "⚠️ Stale lock detected (age: ${AGE}s > ${LOCK_EXPIRY_SECONDS}s). Removing..."
+            ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "rm -f ${LOCK_FILE_PATH}"
+        else
+            echo "❌ Lock already exists and is fresh. Aborting this cycle."
+            echo "${LOCK_DATA}" > "${LOCAL_LOCK_STATE_FILE}"
+            return 1
         fi
-    done
+    fi
+
+    # Generate new lock content
+    LOCK_TS=$(date +%s)
+    LOCK_DATA="{\"host\": \"$(hostname)\", \"timestamp\": ${LOCK_TS}}"
+
+    # Write lock
+    echo "${LOCK_DATA}" | ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "cat > ${LOCK_FILE_PATH}"
+    echo "${LOCK_DATA}" > "${LOCAL_LOCK_STATE_FILE}"
+
+    echo "✅ Lock acquired on ${BOOTSTRAP_HOST}."
+    return 0
+}
+
+function release_lock {
+    echo "Releasing lock on ${BOOTSTRAP_HOST}..."
+
+    if [ ! -f "${LOCAL_LOCK_STATE_FILE}" ]; then
+        echo "⚠️ No local lock state found. Skipping release."
+        return 1
+    fi
+
+    LOCAL_LOCK_DATA=$(cat "${LOCAL_LOCK_STATE_FILE}")
+    LOCAL_LOCK_HOST=$(echo "${LOCAL_LOCK_DATA}" | jq -r '.host')
+    REMOTE_LOCK_DATA=$(ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "cat ${LOCK_FILE_PATH}" 2>/dev/null)
+    REMOTE_LOCK_HOST=$(echo "${REMOTE_LOCK_DATA}" | jq -r '.host')
+
+    if [[ "${REMOTE_LOCK_HOST}" == "${LOCAL_LOCK_HOST}" ]]; then
+        ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "rm -f ${LOCK_FILE_PATH}"
+        echo "✅ Lock released."
+        rm -f "${LOCAL_LOCK_STATE_FILE}"
+    else
+        echo "⚠️ Lock is not owned by this node. Skipping release."
+    fi
+}
+
+function lock_mirror {
+    MIRROR="$1"
+    MIRROR_LOCK_FILE="/mnt/bootstrap/.botstrap.lock"
+    LOCAL_MIRROR_LOCK_FILE="${MIRROR_LOCK_STATE_DIR}/${MIRROR}.json"
+
+    echo "🔐 Attempting mirror lock on ${MIRROR}..."
+
+    if ssh "${BOOTSTRAP_USER}@${MIRROR}" "[ -f ${MIRROR_LOCK_FILE} ]"; then
+        REMOTE_LOCK_DATA=$(ssh "${BOOTSTRAP_USER}@${MIRROR}" "cat ${MIRROR_LOCK_FILE}" 2>/dev/null)
+        REMOTE_TS=$(echo "${REMOTE_LOCK_DATA}" | jq -r '.timestamp // 0')
+        NOW_TS=$(date +%s)
+        AGE=$((NOW_TS - REMOTE_TS))
+
+        if [ "$AGE" -gt "$MIRROR_LOCK_EXPIRY_SECONDS" ]; then
+            echo "⚠️ Stale mirror lock (age ${AGE}s). Removing it..."
+            ssh "${BOOTSTRAP_USER}@${MIRROR}" "rm -f ${MIRROR_LOCK_FILE}"
+        else
+            echo "❌ Mirror lock on ${MIRROR} is active and fresh. Skipping."
+            echo "${REMOTE_LOCK_DATA}" > "${LOCAL_MIRROR_LOCK_FILE}"
+            return 1
+        fi
+    fi
+
+    # Set new lock
+    LOCK_TS=$(date +%s)
+    LOCK_VAL="{\"host\": \"$(hostname)\", \"timestamp\": ${LOCK_TS}}"
+
+    echo "${LOCK_VAL}" | ssh "${BOOTSTRAP_USER}@${MIRROR}" "cat > ${MIRROR_LOCK_FILE}"
+    echo "${LOCK_VAL}" > "${LOCAL_MIRROR_LOCK_FILE}"
+    echo "✅ Mirror lock set for ${MIRROR}"
+}
+
+function unlock_mirror {
+    MIRROR="$1"
+    MIRROR_LOCK_FILE="/mnt/bootstrap/.botstrap.lock"
+    LOCAL_MIRROR_LOCK_FILE="${MIRROR_LOCK_STATE_DIR}/${MIRROR}.json"
+
+    if [ ! -f "${LOCAL_MIRROR_LOCK_FILE}" ]; then
+        echo "⚠️ No local mirror lock file found for ${MIRROR}, skipping unlock."
+        return 1
+    fi
+
+    LOCAL_DATA=$(cat "${LOCAL_MIRROR_LOCK_FILE}")
+    LOCAL_HOST=$(echo "${LOCAL_DATA}" | jq -r '.host')
+
+    REMOTE_DATA=$(ssh "${BOOTSTRAP_USER}@${MIRROR}" "cat ${MIRROR_LOCK_FILE}" 2>/dev/null)
+    REMOTE_HOST=$(echo "${REMOTE_DATA}" | jq -r '.host')
+
+    if [[ "${REMOTE_HOST}" == "${LOCAL_HOST}" ]]; then
+        ssh "${BOOTSTRAP_USER}@${MIRROR}" "rm -f ${MIRROR_LOCK_FILE}"
+        echo "✅ Released mirror lock on ${MIRROR}"
+        rm -f "${LOCAL_MIRROR_LOCK_FILE}"
+    else
+        echo "⚠️ Mirror lock on ${MIRROR} is not owned by us. Skipping release."
+    fi
 }
 
 function deploy_to_remote_host {
@@ -439,11 +530,15 @@ function run {
         return "${EXIT_CODE}"
     fi
 
+    initiate_lock || return $?
+
     sync_mirrors
 
     # Go live
     deploy
     EXIT_CODE=$?
+    release_lock 
+    find /opt/botstrap/logs -name "botstrap-rclone-*.log" -type f -mtime +7 -exec rm -f {} \; 2>/dev/null
     if [ "${EXIT_CODE}" -ne 0 ]; then
         return "${EXIT_CODE}"
     fi

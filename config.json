@@ -13,5 +13,6 @@
     "bootstrapWebRoot": "/var/www/html",
     "timeout": 14400,
     "bootstrapInterval": 39600,
-    "retryInterval": 60
+    "retryInterval": 60,
+    "createBootstrapErrorTotal": 20
 }
