@@ -55,22 +55,22 @@ function read_config {
 LOCK_FILE_NAME=".botstrap.lock"
 LOCK_FILE_CONTENT="locked-by-$(hostname)-$(date +%s)"
 LOCK_FILE_PATH="${BOOTSTRAP_WEBROOT}/${LOCK_FILE_NAME}"
-LOCK_EXPIRY_SECONDS=600
+LOCK_EXPIRY_SECONDS=900
 LOCAL_LOCK_STATE_FILE="/opt/botstrap/state/last-lock.json"
 MIRROR_LOCK_STATE_DIR="/opt/botstrap/state/mirrors"
+MIRROR_LOCK_EXPIRY_SECONDS=900
 mkdir -p "${MIRROR_LOCK_STATE_DIR}"
 
 function create_bootstrap {
     # Check if we need to restart the node
-    if [ "${CREATE_BOOTSTRAP_ERRORS}" -ge "${CREATE_BOOTSTRAP_ERROR_TOTAL}" ]; then
-        
-    # This relies on having a systemd service set up to automatically start qortal after stopping.
-    echo "Restarting node due to ${CREATE_BOOTSTRAP_ERRORS} consecutive errors..."
-	# testing stopping via bash and stop script instead of trying to use sudo in script running as user.
-	bash /opt/qortal/stop.sh
-	# sleeping for 100 seconds to give Qortal service a chance to start fully again...
-	CREATE_BOOTSTRAP_ERRORS=0
-	sleep 100
+    if [ "${CREATE_BOOTSTRAP_ERRORS}" -ge "${CREATE_BOOTSTRAP_ERROR_TOTAL}" ]; then    
+        # This relies on having a systemd service set up to automatically start qortal after stopping.
+        echo "Restarting node due to ${CREATE_BOOTSTRAP_ERRORS} consecutive errors..."
+        # testing stopping via bash and stop script instead of trying to use sudo in script running as user.
+        bash /opt/qortal/stop.sh
+        # sleeping for 100 seconds to give Qortal service a chance to start fully again...
+        CREATE_BOOTSTRAP_ERRORS=0
+        sleep 100
     fi
 
     echo "Attempting to create bootstrap..."
@@ -300,14 +300,6 @@ function upload {
         return 2
     fi
 
-    # Validate timestamps before uploading
-    REMOTE_BOOTSTRAP="${BOOTSTRAP_WEBROOT}/$(basename -- ${BOOTSTRAP_PATH})"
-    validate_timestamp "${REMOTE_BOOTSTRAP}" "${BOOTSTRAP_PATH}"
-    EXIT_CODE=$?
-    if [ "${EXIT_CODE}" -ne 0 ]; then
-        return "${EXIT_CODE}"
-    fi
-
     if [[ "${BOOTSTRAP_HOST_MODE}" == "remote" ]]; then
         upload_to_main_host
         EXIT_CODE=$?
@@ -385,7 +377,7 @@ function release_lock {
 
 function lock_mirror {
     MIRROR="$1"
-    MIRROR_LOCK_FILE="/mnt/bootstrap/.botstrap.lock"
+    MIRROR_LOCK_FILE="${BOOTSTRAP_WEBROOT}/${LOCK_FILE_NAME}"
     LOCAL_MIRROR_LOCK_FILE="${MIRROR_LOCK_STATE_DIR}/${MIRROR}.json"
 
     echo "🔐 Attempting mirror lock on ${MIRROR}..."
@@ -417,7 +409,7 @@ function lock_mirror {
 
 function unlock_mirror {
     MIRROR="$1"
-    MIRROR_LOCK_FILE="/mnt/bootstrap/.botstrap.lock"
+    MIRROR_LOCK_FILE="${BOOTSTRAP_WEBROOT}/${LOCK_FILE_NAME}"
     LOCAL_MIRROR_LOCK_FILE="${MIRROR_LOCK_STATE_DIR}/${MIRROR}.json"
 
     if [ ! -f "${LOCAL_MIRROR_LOCK_FILE}" ]; then
@@ -469,14 +461,24 @@ function deploy_to_mirror {
     local BOOTSTRAP_CHECKSUM_FILENAME_NEW="${BOOTSTRAP_CHECKSUM_FILENAME}.new"
 
     # Create blank existing files if not already there
-    ssh "${BOOTSTRAP_USER}@${MIRROR}" "touch -a ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}"
-    ssh "${BOOTSTRAP_USER}@${MIRROR}" "touch -a ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}"
+    ssh "${BOOTSTRAP_USER}@${MIRROR}" "touch -a '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' && \
+    touch -a '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
 
     # Swap the old and the new bootstraps
-    ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}.old'" &&
-    ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}'" &&
-    ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}.old'" &&
-    ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
+    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}.old'" &&
+    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}'" &&
+    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}.old'" &&
+    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
+    # Check for the presence of the .new files before proceeding, to ensure that the active file doesn't get screwed up. 
+    if ssh "${BOOTSTRAP_USER}@${MIRROR}" "[ -f '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' ]"; then
+        ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}.old' && \
+            mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' && \
+            mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}.old' && \
+            mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
+    else
+        echo "${MIRROR} didn't have ${BOOTSTRAP_FILENAME_NEW}! NOT MOVING FILES!"
+        return 1    
+    fi
 }
 
 function deploy {

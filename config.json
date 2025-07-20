@@ -6,7 +6,7 @@
     "bootstrapHostMode": "local",
     "bootstrapMirrors": [
 	"bootstrap-ssh.qortal.org",
-        "bootstrap2-ssh.qortal.org",
+    "bootstrap2-ssh.qortal.org",
 	"bootstrap4-ssh.qortal.org"
     ],
     "bootstrapUser": "crowetic",
