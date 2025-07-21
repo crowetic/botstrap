@@ -59,6 +59,9 @@ LOCK_EXPIRY_SECONDS=900
 LOCAL_LOCK_STATE_FILE="/opt/botstrap/state/last-lock.json"
 MIRROR_LOCK_STATE_DIR="/opt/botstrap/state/mirrors"
 MIRROR_LOCK_EXPIRY_SECONDS=900
+LOG_DIR="/opt/botstrap/logs"
+
+mkdir -p "${LOG_DIR}"
 mkdir -p "${MIRROR_LOCK_STATE_DIR}"
 
 function create_bootstrap {
@@ -235,6 +238,26 @@ function move_to_local_host {
 
 }
 
+function rsync_with_retry {
+    local SRC="$1"
+    local DEST="$2"
+    local MAX_RETRIES=3
+    local RETRY_DELAY=5
+
+    local attempt=1
+    until rsync -raPz "$SRC" "$DEST"; do
+        echo "⚠️ rsync failed (attempt $attempt/$MAX_RETRIES): $SRC → $DEST"
+        if (( attempt >= MAX_RETRIES )); then
+            echo "❌ Giving up after $MAX_RETRIES failed attempts."
+            return 1
+        fi
+        ((attempt++))
+        sleep "$RETRY_DELAY"
+    done
+    echo "✅ rsync succeeded: $SRC → $DEST"
+    return 0
+}
+
 function sync_mirror {
     MIRROR="$1"
 
@@ -249,13 +272,9 @@ function sync_mirror {
 
     for FILE in "${BOOTSTRAP_FILENAME_NEW}" "${BOOTSTRAP_CHECKSUM_FILENAME_NEW}" "block.txt"; do
         SRC="${BOOTSTRAP_WEBROOT}/${FILE}"
-        DEST=":sftp,host=${MIRROR},user=${BOOTSTRAP_USER}:${BOOTSTRAP_WEBROOT}/${FILE}"
-        
+        DEST="${BOOTSTRAP_USER}@${MIRROR}:${BOOTSTRAP_WEBROOT}/${FILE}"
         echo "Uploading ${SRC} to ${DEST}..."
-        rclone copy "${SRC}" "${DEST}" --retries 5 --transfers 4 --sftp-disable-hashcheck=false --progress --checksum --sftp-set-modtime=false --log-file "/opt/botstrap/logs/botstrap-rclone-${MIRROR}.log" --log-level INFO || {
-            echo "❌ Rclone sync failed for ${MIRROR}/${FILE}"
-            return 1
-        }
+        rsync_with_retry ${SRC} ${DEST}
     done
 
     echo "✅ Mirror ${MIRROR} synced successfully."
@@ -324,16 +343,16 @@ function initiate_lock {
     mkdir -p "$(dirname "${LOCAL_LOCK_STATE_FILE}")"
 
     # Check if lock exists
-    if ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "[ -f ${LOCK_FILE_PATH} ]"; then
-        # Download the lock for inspection
-        LOCK_DATA=$(ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "cat ${LOCK_FILE_PATH}" 2>/dev/null)
-        LOCK_TS=$(echo "${LOCK_DATA}" | jq -r '.timestamp // 0')
+    if [ -f ${LOCK_FILE_PATH} ]; then
+        # Check local lock file
+        LOCK_DATA=$(cat ${LOCK_FILE_PATH} 2>/dev/null)
+        LOCK_TS=$(jq -r '.timestamp // 0')
         NOW_TS=$(date +%s)
         AGE=$((NOW_TS - LOCK_TS))
 
         if [ "$AGE" -gt "$LOCK_EXPIRY_SECONDS" ]; then
             echo "⚠️ Stale lock detected (age: ${AGE}s > ${LOCK_EXPIRY_SECONDS}s). Removing..."
-            ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "rm -f ${LOCK_FILE_PATH}"
+            ssh rm -f "${LOCK_FILE_PATH}"
         else
             echo "❌ Lock already exists and is fresh. Aborting this cycle."
             echo "${LOCK_DATA}" > "${LOCAL_LOCK_STATE_FILE}"
@@ -346,7 +365,7 @@ function initiate_lock {
     LOCK_DATA="{\"host\": \"$(hostname)\", \"timestamp\": ${LOCK_TS}}"
 
     # Write lock
-    echo "${LOCK_DATA}" | ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "cat > ${LOCK_FILE_PATH}"
+    echo "Writing lock on local machine:  ${LOCK_FILE_PATH}"
     echo "${LOCK_DATA}" > "${LOCAL_LOCK_STATE_FILE}"
 
     echo "✅ Lock acquired on ${BOOTSTRAP_HOST}."
@@ -357,22 +376,16 @@ function release_lock {
     echo "Releasing lock on ${BOOTSTRAP_HOST}..."
 
     if [ ! -f "${LOCAL_LOCK_STATE_FILE}" ]; then
-        echo "⚠️ No local lock state found. Skipping release."
-        return 1
+        echo "⚠️ No local lock state found. Continuing..."
+        return
     fi
 
     LOCAL_LOCK_DATA=$(cat "${LOCAL_LOCK_STATE_FILE}")
     LOCAL_LOCK_HOST=$(echo "${LOCAL_LOCK_DATA}" | jq -r '.host')
-    REMOTE_LOCK_DATA=$(ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "cat ${LOCK_FILE_PATH}" 2>/dev/null)
-    REMOTE_LOCK_HOST=$(echo "${REMOTE_LOCK_DATA}" | jq -r '.host')
 
-    if [[ "${REMOTE_LOCK_HOST}" == "${LOCAL_LOCK_HOST}" ]]; then
-        ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "rm -f ${LOCK_FILE_PATH}"
-        echo "✅ Lock released."
-        rm -f "${LOCAL_LOCK_STATE_FILE}"
-    else
-        echo "⚠️ Lock is not owned by this node. Skipping release."
-    fi
+    
+    rm -f "${LOCAL_LOCK_STATE_FILE}"
+    
 }
 
 function lock_mirror {
@@ -464,12 +477,6 @@ function deploy_to_mirror {
     ssh "${BOOTSTRAP_USER}@${MIRROR}" "touch -a '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' && \
     touch -a '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
 
-    # Swap the old and the new bootstraps
-    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}.old'" &&
-    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}'" &&
-    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}.old'" &&
-    # ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
-    # Check for the presence of the .new files before proceeding, to ensure that the active file doesn't get screwed up. 
     if ssh "${BOOTSTRAP_USER}@${MIRROR}" "[ -f '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' ]"; then
         ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}.old' && \
             mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' && \
