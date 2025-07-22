@@ -1,0 +1,13 @@
+[Unit]
+Description=BSOverlord - Qortal Bootstrap Auditor
+After=network.target
+
+[Service]
+Type=simple
+User=crowetic
+WorkingDirectory=/opt/botstrap
+ExecStart=/opt/botstrap/botstrap-auditor.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

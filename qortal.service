@@ -1,0 +1,15 @@
+[Unit]
+Description=Qortal
+After=network.target
+
+[Service]
+Type=simple
+User=crowetic
+WorkingDirectory=/opt/qortal
+ExecStartPre=-mv -f new-qortal.jar qortal.jar
+ExecStart=java -Xss1024k -XX:MaxRAM=8172m -XX:+UseG1GC -jar /opt/qortal/qortal.jar
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
