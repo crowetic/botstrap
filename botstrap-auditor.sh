@@ -260,6 +260,6 @@ EOF
 
 while true; do
   run_audit
-  echo "🛌 Sleeping for 7200 seconds (120 minutes) before next audit..."
+  echo "🛌 Sleeping for 3000 seconds (50 minutes) before next audit..."
   sleep 3000
 done
