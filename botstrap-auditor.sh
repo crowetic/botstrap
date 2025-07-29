@@ -30,45 +30,65 @@ function is_local_node {
 }
 
 function rsync_with_retry {
-    local SRC="$1"
-    local DEST="$2"
-    local MAX_RETRIES=3
-    local RETRY_DELAY=5
-    local attempt=1
-    until rsync -raPz --delay-updates --partial-dir=.rsync-tmp "$SRC" "$DEST"; do
-        echo "⚠️ rsync failed (attempt $attempt/$MAX_RETRIES): $SRC → $DEST"
-        if (( attempt >= MAX_RETRIES )); then
-            echo "❌ Giving up after $MAX_RETRIES failed attempts."
-            return 1
-        fi
-        ((attempt++))
-        sleep "$RETRY_DELAY"
-    done
-    echo "✅ rsync succeeded: $SRC → $DEST"
-    return 0
+  local SRC="$1"
+  local DEST="$2"
+  local MAX_RETRIES=3
+  local RETRY_DELAY=5
+  local attempt=1
+  until rsync -raPz --delay-updates --partial-dir=.rsync-tmp "$SRC" "$DEST"; do
+    echo "⚠️ rsync failed (attempt $attempt/$MAX_RETRIES): $SRC → $DEST"
+    if (( attempt >= MAX_RETRIES )); then
+      echo "❌ Giving up after $MAX_RETRIES failed attempts."
+      return 1
+    fi
+    ((attempt++))
+    sleep "$RETRY_DELAY"
+  done
+
+  echo "✅ rsync succeeded: $SRC → $DEST"
+  return 0
+}
+
+rsync_retry_skipnew() {
+  local SRC="$1"
+  local DEST="$2"
+  local MAX_RETRIES=3
+  local RETRY_DELAY=5
+  local attempt=1
+  until rsync -raPz --exclude='*.new*' --delay-updates --partial-dir=.rsync-tmp "$SRC" "$DEST"; do
+    echo "⚠️ rsync failed (attempt $attempt/$MAX_RETRIES): $SRC → $DEST"
+    if (( attempt >= MAX_RETRIES )); then
+      echo "❌ Giving up after $MAX_RETRIES failed attempts."
+      return 1
+    fi
+    ((attempt++))
+    sleep "$RETRY_DELAY"
+  done
+  echo "✅ rsync succeeded: $SRC → $DEST"
+  return 0
 }
 
 function ssh_with_retry {
-    local host="$1"
-    local cmd="$2"
-    local retries=4
-    local delay=5
-    local timeout=30
+  local host="$1"
+  local cmd="$2"
+  local retries=4
+  local delay=5
+  local timeout=30
 
-    for ((i=1; i<=retries; i++)); do
-        >&2 echo "SSH attempt $i/$retries to $host..."
-        local output
-        if output=$(ssh -o ConnectTimeout=$timeout -o BatchMode=yes "$host" "$cmd" 2>/dev/null); then
-            echo "$output"
-            return 0
-        fi
-        >&2 echo "SSH failed. Retrying in $delay seconds..."
-        sleep $delay
-        delay=$((delay * 2))
-    done
+  for ((i=1; i<=retries; i++)); do
+    >&2 echo "SSH attempt $i/$retries to $host..."
+    local output
+    if output=$(ssh -o ConnectTimeout=$timeout -o BatchMode=yes "$host" "$cmd" 2>/dev/null); then
+      echo "$output"
+      return 0
+    fi
+    >&2 echo "SSH failed. Retrying in $delay seconds..."
+    sleep $delay
+    delay=$((delay * 2))
+  done
 
-    >&2 echo "SSH to $host failed after $retries attempts."
-    return 1
+  >&2 echo "SSH to $host failed after $retries attempts."
+  return 1
 }
 
 
@@ -247,16 +267,16 @@ EOF
       echo "📦 Downloading all files from $LATEST_NODE..."
 
       if is_local_node "$LATEST_NODE"; then
-        rsync_with_retry "${BOOTSTRAP_WEBROOT}/" "$TMPDIR/" || exit 1
+        rsync_retry_skipnew "${BOOTSTRAP_WEBROOT}/" "$TMPDIR/" || exit 1
       else
-        rsync_with_retry "${BOOTSTRAP_USER}@${LATEST_NODE}:${BOOTSTRAP_WEBROOT}/" "$TMPDIR/" || exit 1
+        rsync_retry_skipnew "${BOOTSTRAP_USER}@${LATEST_NODE}:${BOOTSTRAP_WEBROOT}/" "$TMPDIR/" || exit 1
       fi
 
       echo "🚀 Syncing files to $TARGET_NODE..."
       if is_local_node "$TARGET_NODE"; then
-        rsync_with_retry "$TMPDIR/" "${BOOTSTRAP_WEBROOT}/"
+        rsync_retry_skipnew "$TMPDIR/" "${BOOTSTRAP_WEBROOT}/"
       else
-        rsync_with_retry "$TMPDIR/" "${BOOTSTRAP_USER}@${TARGET_NODE}:${BOOTSTRAP_WEBROOT}/" || continue
+        rsync_retry_skipnew "$TMPDIR/" "${BOOTSTRAP_USER}@${TARGET_NODE}:${BOOTSTRAP_WEBROOT}/" || continue
       fi
 
       echo "✅ Node $TARGET_NODE repaired."
