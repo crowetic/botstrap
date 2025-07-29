@@ -49,7 +49,7 @@ function rsync_with_retry {
 }
 
 function ssh_with_retry {
-local host="$1"
+    local host="$1"
     local cmd="$2"
     local retries=4
     local delay=5
