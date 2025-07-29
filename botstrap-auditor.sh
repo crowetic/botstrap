@@ -48,7 +48,26 @@ function rsync_with_retry {
     return 0
 }
 
-function safe_ssh() {
+function ssh_with_retry {
+    local host="$1"
+    local cmd="$2"
+    local retries=4
+    local delay=5
+    local timeout=20
+
+    for ((i=1; i<=retries; i++)); do
+        echo "SSH attempt $i/$retries to $host..."
+        ssh -o ConnectTimeout=$timeout -o BatchMode=yes "$host" "$cmd" && return 0
+        echo "SSH failed. Retrying in $delay seconds..."
+        sleep $delay
+        delay=$((delay * 2)) # exponential backoff
+    done
+
+    echo "SSH to $host failed after $retries attempts."
+    return 1
+}
+
+function safe_ssh {
   local HOST="$1"
   shift
   local CMD="$*"
@@ -64,8 +83,7 @@ function release_cluster_lock {
       if is_local_node "$NODE"; then
         rm -f "${BOOTSTRAP_WEBROOT}/${LOCK}"
       else
-        ssh_cmd=(ssh "${BOOTSTRAP_USER}@${NODE}")
-        "${ssh_cmd[@]}" "rm -f ${BOOTSTRAP_WEBROOT}/${LOCK}"
+        ssh_with_retry "${BOOTSTRAP_USER}@${NODE}" "rm -f ${BOOTSTRAP_WEBROOT}/${LOCK}"
       fi
     done
   done
@@ -112,29 +130,29 @@ function run_audit {
       fi
 
     else
-      safe_ssh "$NODE" "test -f ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}" || {
+      ssh_with_retry "$NODE" "test -f ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}" || {
         FILES_PRESENT=false
         STATUS="missing"
         ERROR="Missing bootstrap file"
       }
 
-      safe_ssh "$NODE" "test -f ${BOOTSTRAP_WEBROOT}/${CHECKSUM_FILENAME}" || {
+      ssh_with_retry "$NODE" "test -f ${BOOTSTRAP_WEBROOT}/${CHECKSUM_FILENAME}" || {
         FILES_PRESENT=false
         STATUS="missing"
         ERROR="Missing checksum file"
       }
 
-      safe_ssh "$NODE" "test -f ${BOOTSTRAP_WEBROOT}/${BLOCK_FILENAME}" || {
+      ssh_with_retry "$NODE" "test -f ${BOOTSTRAP_WEBROOT}/${BLOCK_FILENAME}" || {
         FILES_PRESENT=false
         STATUS="missing"
         ERROR="Missing block.txt"
       }
 
       if [ "$FILES_PRESENT" = true ]; then
-        CHECKSUM_REMOTE=$(safe_ssh "$NODE" "cat ${BOOTSTRAP_WEBROOT}/${CHECKSUM_FILENAME}" | awk '{print $1}' || echo "")
-        COMPUTED_CHECKSUM=$(safe_ssh "$NODE" "sha256sum ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}" | awk '{print $1}' || echo "")
+        CHECKSUM_REMOTE=$(ssh_with_retry "$NODE" "cat ${BOOTSTRAP_WEBROOT}/${CHECKSUM_FILENAME}" | awk '{print $1}' || echo "")
+        COMPUTED_CHECKSUM=$(ssh_with_retry "$NODE" "sha256sum ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}" | awk '{print $1}' || echo "")
         
-        BLOCK_LINE=$(safe_ssh "$NODE" "head -n 1 ${BOOTSTRAP_WEBROOT}/${BLOCK_FILENAME}" || echo "")
+        BLOCK_LINE=$(ssh_with_retry "$NODE" "head -n 1 ${BOOTSTRAP_WEBROOT}/${BLOCK_FILENAME}" || echo "")
         if [[ "$BLOCK_LINE" =~ ^[0-9]+$ ]]; then
           BLOCK_HEIGHT="$BLOCK_LINE"
         else
@@ -145,7 +163,7 @@ function run_audit {
           ERROR="Missing or invalid block.txt"
         fi
 
-        FILE_TIMESTAMP=$(safe_ssh "$NODE" "stat -c %Y ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}" || echo 0)
+        FILE_TIMESTAMP=$(ssh_with_retry "$NODE" "stat -c %Y ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}" || echo 0)
         [[ "$FILE_TIMESTAMP" =~ ^[0-9]+$ ]] || FILE_TIMESTAMP=0
       fi
 
