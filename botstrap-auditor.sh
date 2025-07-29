@@ -53,7 +53,7 @@ function ssh_with_retry {
     local cmd="$2"
     local retries=4
     local delay=5
-    local timeout=20
+    local timeout=30
 
     for ((i=1; i<=retries; i++)); do
         >&2 echo "SSH attempt $i/$retries to $host..."
