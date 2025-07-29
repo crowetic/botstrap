@@ -145,10 +145,10 @@ function upload_to_main_host {
 
     # Upload the files
     echo "Uploading ${BOOTSTRAP_PATH} to ${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}..."
-    rsync -raPz "${BOOTSTRAP_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}"
+    rsync_with_retry "${BOOTSTRAP_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}"
     
     echo "Uploading ${BOOTSTRAP_CHECKSUM_PATH} to ${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}..."
-    rsync -raPz "${BOOTSTRAP_CHECKSUM_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}"
+    rsync_with_retry "${BOOTSTRAP_CHECKSUM_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}"
 
     # Upload block.txt to the main host
     if [ -f "block.txt" ]; then
@@ -158,7 +158,7 @@ function upload_to_main_host {
     fi
 
     echo "Uploading ${BLOCK_FILE_PATH} to ${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/block.txt..."
-    rsync -raPz "${BLOCK_FILE_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/block.txt"
+    rsync_with_retry "${BLOCK_FILE_PATH}" "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}:${BOOTSTRAP_WEBROOT}/block.txt"
 
     # Check the files are intact
     local CHECKSUM_URL="http://${BOOTSTRAP_HOST}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}"
@@ -177,7 +177,7 @@ function upload_to_main_host {
     fi
 
     # Check that the uploaded file matches its checksum file
-    COMPUTED_CHECKSUM_REMOTE=$(ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "sha256sum ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}" | awk '{ print $1 }')
+    COMPUTED_CHECKSUM_REMOTE=$(ssh_with_retry "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "sha256sum ${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}" | awk '{ print $1 }')
     if [[ "${COMPUTED_CHECKSUM_REMOTE}" != "${CHECKSUM_LOCAL}" ]]; then
         echo "Error: checksum of uploaded file does not match"
         echo "CHECKSUM_LOCAL: ${CHECKSUM_LOCAL}"
@@ -236,6 +236,25 @@ function move_to_local_host {
     echo "Files copied successfully"
     return 0
 
+}
+
+function ssh_with_retry {
+    local host="$1"
+    local cmd="$2"
+    local retries=4
+    local delay=5
+    local timeout=20
+
+    for ((i=1; i<=retries; i++)); do
+        echo "SSH attempt $i/$retries to $host..."
+        ssh -o ConnectTimeout=$timeout -o BatchMode=yes "$host" "$cmd" && return 0
+        echo "SSH failed. Retrying in $delay seconds..."
+        sleep $delay
+        delay=$((delay * 2)) # exponential backoff
+    done
+
+    echo "SSH to $host failed after $retries attempts."
+    return 1
 }
 
 function rsync_with_retry {
@@ -297,7 +316,7 @@ function validate_timestamp {
     REMOTE_FILE="${1}"
     LOCAL_FILE="${2}"
 
-    REMOTE_TIMESTAMP=$(ssh "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "stat -c %Y ${REMOTE_FILE}")
+    REMOTE_TIMESTAMP=$(ssh_with_retry "${BOOTSTRAP_USER}@${BOOTSTRAP_HOST}" "stat -c %Y ${REMOTE_FILE}")
     LOCAL_TIMESTAMP=$(stat -c %Y "${LOCAL_FILE}")
 
     if [ "${LOCAL_TIMESTAMP}" -le "${REMOTE_TIMESTAMP}" ]; then
@@ -352,7 +371,7 @@ function initiate_lock {
 
         if [ "$AGE" -gt "$LOCK_EXPIRY_SECONDS" ]; then
             echo "⚠️ Stale lock detected (age: ${AGE}s > ${LOCK_EXPIRY_SECONDS}s). Removing..."
-            ssh rm -f "${LOCK_FILE_PATH}"
+            ssh_with_retry rm -f "${LOCK_FILE_PATH}"
         else
             echo "❌ Lock already exists and is fresh. Aborting this cycle."
             echo "${LOCK_DATA}" > "${LOCAL_LOCK_STATE_FILE}"
@@ -395,15 +414,15 @@ function lock_mirror {
 
     echo "🔐 Attempting mirror lock on ${MIRROR}..."
 
-    if ssh "${BOOTSTRAP_USER}@${MIRROR}" "[ -f ${MIRROR_LOCK_FILE} ]"; then
-        REMOTE_LOCK_DATA=$(ssh "${BOOTSTRAP_USER}@${MIRROR}" "cat ${MIRROR_LOCK_FILE}" 2>/dev/null)
+    if ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "[ -f ${MIRROR_LOCK_FILE} ]"; then
+        REMOTE_LOCK_DATA=$(ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "cat ${MIRROR_LOCK_FILE}" 2>/dev/null)
         REMOTE_TS=$(echo "${REMOTE_LOCK_DATA}" | jq -r '.timestamp // 0')
         NOW_TS=$(date +%s)
         AGE=$((NOW_TS - REMOTE_TS))
 
         if [ "$AGE" -gt "$MIRROR_LOCK_EXPIRY_SECONDS" ]; then
             echo "⚠️ Stale mirror lock (age ${AGE}s). Removing it..."
-            ssh "${BOOTSTRAP_USER}@${MIRROR}" "rm -f ${MIRROR_LOCK_FILE}"
+            ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "rm -f ${MIRROR_LOCK_FILE}"
         else
             echo "❌ Mirror lock on ${MIRROR} is active and fresh. Skipping."
             echo "${REMOTE_LOCK_DATA}" > "${LOCAL_MIRROR_LOCK_FILE}"
@@ -415,7 +434,7 @@ function lock_mirror {
     LOCK_TS=$(date +%s)
     LOCK_VAL="{\"host\": \"$(hostname)\", \"timestamp\": ${LOCK_TS}}"
 
-    echo "${LOCK_VAL}" | ssh "${BOOTSTRAP_USER}@${MIRROR}" "cat > ${MIRROR_LOCK_FILE}"
+    echo "${LOCK_VAL}" | ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "cat > ${MIRROR_LOCK_FILE}"
     echo "${LOCK_VAL}" > "${LOCAL_MIRROR_LOCK_FILE}"
     echo "✅ Mirror lock set for ${MIRROR}"
 }
@@ -433,11 +452,11 @@ function unlock_mirror {
     LOCAL_DATA=$(cat "${LOCAL_MIRROR_LOCK_FILE}")
     LOCAL_HOST=$(echo "${LOCAL_DATA}" | jq -r '.host')
 
-    REMOTE_DATA=$(ssh "${BOOTSTRAP_USER}@${MIRROR}" "cat ${MIRROR_LOCK_FILE}" 2>/dev/null)
+    REMOTE_DATA=$(ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "cat ${MIRROR_LOCK_FILE}" 2>/dev/null)
     REMOTE_HOST=$(echo "${REMOTE_DATA}" | jq -r '.host')
 
     if [[ "${REMOTE_HOST}" == "${LOCAL_HOST}" ]]; then
-        ssh "${BOOTSTRAP_USER}@${MIRROR}" "rm -f ${MIRROR_LOCK_FILE}"
+        ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "rm -f ${MIRROR_LOCK_FILE}"
         echo "✅ Released mirror lock on ${MIRROR}"
         rm -f "${LOCAL_MIRROR_LOCK_FILE}"
     else
@@ -474,11 +493,11 @@ function deploy_to_mirror {
     local BOOTSTRAP_CHECKSUM_FILENAME_NEW="${BOOTSTRAP_CHECKSUM_FILENAME}.new"
 
     # Create blank existing files if not already there
-    ssh "${BOOTSTRAP_USER}@${MIRROR}" "touch -a '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' && \
+    ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "touch -a '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' && \
     touch -a '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
 
-    if ssh "${BOOTSTRAP_USER}@${MIRROR}" "[ -f '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' ]"; then
-        ssh "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}.old' && \
+    if ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "[ -f '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' ]"; then
+        ssh_with_retry "${BOOTSTRAP_USER}@${MIRROR}" "mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}.old' && \
             mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_FILENAME}' && \
             mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}.old' && \
             mv '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME_NEW}' '${BOOTSTRAP_WEBROOT}/${BOOTSTRAP_CHECKSUM_FILENAME}'"
