@@ -54,18 +54,23 @@ function ssh_with_retry {
     local retries=4
     local delay=5
     local timeout=20
+    local output=""
 
     for ((i=1; i<=retries; i++)); do
-        echo "SSH attempt $i/$retries to $host..."
-        ssh -o ConnectTimeout=$timeout -o BatchMode=yes "$host" "$cmd" && return 0
-        echo "SSH failed. Retrying in $delay seconds..."
+        echo "SSH attempt $i/$retries to $host..." >&2
+        output=$(ssh -o ConnectTimeout=$timeout -o BatchMode=yes "$host" "$cmd" 2>/dev/null) && {
+            echo "$output"
+            return 0
+        }
+        echo "SSH failed. Retrying in $delay seconds..." >&2
         sleep $delay
-        delay=$((delay * 2)) # exponential backoff
+        delay=$((delay * 2))
     done
 
-    echo "SSH to $host failed after $retries attempts."
+    echo "SSH to $host failed after $retries attempts." >&2
     return 1
 }
+
 
 function safe_ssh {
   local HOST="$1"
